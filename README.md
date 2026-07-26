@@ -46,6 +46,28 @@ wrangler.toml         # Cloudflare Workers config
    *and* the WebSocket relay from the same origin, so no CORS/URL
    mismatch to worry about once step 4 is done.
 
+## Deploy via Cloudflare Workers Builds (GitHub-connected)
+
+If you connected this repo to Cloudflare (auto-deploy on push) instead of
+running `wrangler deploy` locally:
+
+1. In the Cloudflare dashboard, the connected Worker's **name must match**
+   `wrangler.toml`'s `name` field. If they differ, the build log shows a
+   `Failed to match Worker name` warning and CI overrides it — annoying but
+   not fatal. Fix by renaming `name` in `wrangler.toml` to match the
+   dashboard Worker name (or vice versa).
+2. **Free plan Durable Objects require SQLite storage.** The migration in
+   `wrangler.toml` must use `new_sqlite_classes`, not `new_classes`:
+   ```toml
+   [[migrations]]
+   tag = "v1"
+   new_sqlite_classes = ["GameRoom"]
+   ```
+   Using `new_classes` fails on deploy with error code `10097` on non-paid
+   accounts.
+3. Push to your connected branch — Cloudflare builds and deploys
+   automatically; no local `wrangler login` needed.
+
 ## Local dev
 
 ```bash
