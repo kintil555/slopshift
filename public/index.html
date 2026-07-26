@@ -4397,10 +4397,7 @@ void main() {
 (function(){
   "use strict";
   const game = wc, shell = document.getElementById("game-shell") || document.body, canvas = K0;
-  const KEYS = [
-    {up:"KeyW",down:"KeyS",left:"KeyA",right:"KeyD",interact:"KeyE"},
-    {up:"KeyI",down:"KeyK",left:"KeyJ",right:"KeyL",interact:"Slash"}
-  ];
+  const KEY_P1 = {up:"KeyW",down:"KeyS",left:"KeyA",right:"KeyD",interact:"KeyE"};
   const isTouch = matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0;
 
   /* ---------- Fullscreen ---------- */
@@ -4427,9 +4424,9 @@ void main() {
 
   /* ---------- Graphics quality ---------- */
   const QUALITY_PRESETS = {
-    low:    {pixelRatio: 1,                              antialias: false, shadows: false, shadowMapSize: 512},
-    medium: {pixelRatio: Math.min(devicePixelRatio||1, 1.25), antialias: false, shadows: true,  shadowMapSize: 1024},
-    high:   {pixelRatio: Math.min(devicePixelRatio||1, 1.65), antialias: true,  shadows: true,  shadowMapSize: 2048}
+    low:    {pixelRatio: 1,                                    antialias: false, shadows: false, shadowMapSize: 512},
+    medium: {pixelRatio: Math.min(devicePixelRatio||1, 1.25),   antialias: false, shadows: true,  shadowMapSize: 1024},
+    high:   {pixelRatio: Math.min(devicePixelRatio||1, 1.65),   antialias: true,  shadows: true,  shadowMapSize: 2048}
   };
   function applyQuality(name){
     const preset = QUALITY_PRESETS[name] || QUALITY_PRESETS.medium;
@@ -4472,7 +4469,13 @@ void main() {
   });
   refreshGfxButtons(savedQuality);
 
-  /* ---------- Mobile touch controls (dual virtual joysticks) ---------- */
+  /* ---------- Mobile touch controls ----------
+   * One device always controls exactly one local player (WASD/P1 slot),
+   * whether that's solo testing, the network host, or a network guest —
+   * see the networking layer above: guest input is always read from
+   * getPlayerState(0), i.e. the WASD/E keys. So touch controls only ever
+   * need to drive ONE stick + ONE grab button, not a P1/P2 pair.
+   */
   if (isTouch) {
     document.body.classList.add("is-touch-device");
     const input = game.input;
@@ -4491,18 +4494,22 @@ void main() {
       }
     }
 
-    function makeStick(playerIdx, side) {
+    const touchRoot = document.createElement("div");
+    touchRoot.id = "slop-touch-controls";
+    shell.appendChild(touchRoot);
+
+    function makeStick() {
       const wrap = document.createElement("div");
-      wrap.className = "slop-touch-stick slop-touch-stick-" + side;
+      wrap.className = "slop-touch-stick slop-touch-stick-right";
       const base = document.createElement("div");
       base.className = "slop-touch-stick-base";
       const knob = document.createElement("div");
       knob.className = "slop-touch-stick-knob";
       base.appendChild(knob);
       wrap.appendChild(base);
-      shell.appendChild(wrap);
+      touchRoot.appendChild(wrap);
 
-      const keys = KEYS[playerIdx];
+      const keys = KEY_P1;
       let activeId = null, cx = 0, cy = 0;
       const RADIUS = 46;
       let curUp=false, curDown=false, curLeft=false, curRight=false;
@@ -4564,18 +4571,16 @@ void main() {
       wrap.addEventListener("touchcancel", end);
       return wrap;
     }
-    makeStick(0, "left");
-    makeStick(1, "right");
+    makeStick();
 
-    function makeButton(label, cls, keyCode, side) {
+    function makeGrabButton() {
       const btn = document.createElement("button");
       btn.type = "button";
-      btn.className = "slop-touch-action " + cls;
-      btn.textContent = label;
-      btn.style[side] = "0";
-      shell.appendChild(btn);
-      const onDown = (e) => { setKey(keyCode, true); e.preventDefault(); };
-      const onUp = (e) => { setKey(keyCode, false); e.preventDefault(); };
+      btn.className = "slop-touch-action slop-touch-interact-left";
+      btn.textContent = "E";
+      touchRoot.appendChild(btn);
+      const onDown = (e) => { setKey(KEY_P1.interact, true); e.preventDefault(); };
+      const onUp = (e) => { setKey(KEY_P1.interact, false); e.preventDefault(); };
       btn.addEventListener("touchstart", onDown, {passive:false});
       btn.addEventListener("touchend", onUp);
       btn.addEventListener("touchcancel", onUp);
@@ -4583,12 +4588,24 @@ void main() {
       btn.addEventListener("mouseup", onUp);
       return btn;
     }
-    makeButton("E", "slop-touch-interact-p1", KEYS[0].interact, "left");
-    makeButton("/", "slop-touch-interact-p2", KEYS[1].interact, "right");
+    makeGrabButton();
 
     const startBtn = document.querySelector('[data-screen="title"] [data-action="start"]');
     if (startBtn) startBtn.addEventListener("click", () => { if (!isFs()) toggleFs(); }, {once:true});
   }
+
+  /* ---------- Show gameplay controls only during actual play ----------
+   * Hide the touch stick/button and (optionally) gfx/fullscreen chrome
+   * while on the title, pause, or results screens; only show during
+   * "countdown" and "playing".
+   */
+  const playChrome = document.getElementById("slop-touch-controls");
+  function syncChromeVisibility() {
+    const playing = game.state === "playing" || game.state === "countdown";
+    if (playChrome) playChrome.classList.toggle("is-hidden", !playing);
+  }
+  setInterval(syncChromeVisibility, 150);
+  syncChromeVisibility();
 
   /* ---------- Styles ---------- */
   const style = document.createElement("style");
@@ -4600,19 +4617,20 @@ void main() {
     ".slop-gfx-btn{font-size:11px;padding:4px 8px;border-radius:7px;border:1px solid transparent;background:transparent;color:#e7e6da;cursor:pointer}" +
     ".slop-gfx-btn.is-active{background:rgba(120,190,160,.35);border-color:rgba(120,190,160,.6)}" +
     "body.is-touch-device #slop-gfx-settings{top:auto;bottom:12px;right:12px}" +
-    ".slop-touch-stick{position:absolute;bottom:26px;z-index:6;width:120px;height:120px;pointer-events:auto;touch-action:none}" +
-    ".slop-touch-stick-left{left:22px}.slop-touch-stick-right{right:22px}" +
+    "#slop-touch-controls{position:absolute;inset:0;z-index:6;pointer-events:none}" +
+    "#slop-touch-controls.is-hidden{display:none}" +
+    "#slop-touch-controls .slop-touch-stick,#slop-touch-controls .slop-touch-action{pointer-events:auto}" +
+    ".slop-touch-stick{position:absolute;bottom:26px;z-index:6;width:120px;height:120px;touch-action:none}" +
+    ".slop-touch-stick-right{right:22px}" +
     ".slop-touch-stick-base{position:relative;width:100%;height:100%;border-radius:50%;background:rgba(255,255,255,.08);border:2px solid rgba(255,255,255,.25)}" +
     ".slop-touch-stick-knob{position:absolute;left:50%;top:50%;width:52px;height:52px;margin:-26px 0 0 -26px;border-radius:50%;background:rgba(255,255,255,.32);border:1px solid rgba(255,255,255,.5);transition:background .15s}" +
     ".slop-touch-stick.is-active .slop-touch-stick-knob{background:rgba(120,190,160,.65)}" +
-    ".slop-touch-action{position:absolute;bottom:170px;z-index:6;width:64px;height:64px;border-radius:50%;background:rgba(255,255,255,.14);border:2px solid rgba(255,255,255,.3);color:#fff;font-size:20px;font-weight:700;pointer-events:auto;touch-action:none}" +
-    ".slop-touch-interact-p1{left:32px}.slop-touch-interact-p2{right:32px}" +
+    ".slop-touch-action{position:absolute;bottom:44px;z-index:6;width:64px;height:64px;border-radius:50%;background:rgba(255,255,255,.14);border:2px solid rgba(255,255,255,.3);color:#fff;font-size:20px;font-weight:700;touch-action:none}" +
+    ".slop-touch-interact-left{left:32px}" +
     "body.is-touch-device #game-shell{touch-action:none}" +
     "@media (min-width:900px){.slop-touch-stick,.slop-touch-action{transform:scale(1.1)}}";
   document.head.appendChild(style);
 })();
-//# sourceMappingURL=index-DtTYc6WL.js.map
-
 </script>
   <style>
 :root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;background:#080b0d;color:#f4f3e7;font-synthesis:none;text-rendering:optimizeLegibility}*{box-sizing:border-box}html,body,#app,#game-shell{width:100%;height:100%;margin:0;overflow:hidden}body{background:radial-gradient(circle at 50% 35%,#202a27,#0c1012 44%,#050708);user-select:none}button,input{font:inherit}button{-webkit-tap-highlight-color:transparent}#game-shell{position:relative;isolation:isolate;background:#090c0e}#game-canvas{display:block;width:100%;height:100%;outline:none;touch-action:none}#ui-root{position:absolute;inset:0;z-index:4;pointer-events:none}#vignette{position:absolute;inset:0;z-index:2;pointer-events:none;background:linear-gradient(180deg,rgba(0,0,0,.34),transparent 19%,transparent 73%,rgba(0,0,0,.44)),radial-gradient(ellipse at center,transparent 44%,rgba(0,0,0,.52) 115%);mix-blend-mode:multiply}#impact-flash{position:absolute;inset:0;z-index:3;pointer-events:none;opacity:0;background:radial-gradient(circle,transparent 10%,rgba(255,184,58,.46))}#impact-flash.flash{animation:impact-flash .18s ease-out}@keyframes impact-flash{0%{opacity:.8}to{opacity:0}}@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:1ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:1ms!important}}
