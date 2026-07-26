@@ -4398,6 +4398,7 @@ void main() {
   "use strict";
   const game = wc, shell = document.getElementById("game-shell") || document.body, canvas = K0;
   const KEY_P1 = {up:"KeyW",down:"KeyS",left:"KeyA",right:"KeyD",interact:"KeyE"};
+  const KEY_P2 = {up:"KeyI",down:"KeyK",left:"KeyJ",right:"KeyL",interact:"Slash"};
   const isTouch = matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0;
 
   /* ---------- Fullscreen ---------- */
@@ -4470,11 +4471,12 @@ void main() {
   refreshGfxButtons(savedQuality);
 
   /* ---------- Mobile touch controls ----------
-   * One device always controls exactly one local player (WASD/P1 slot),
-   * whether that's solo testing, the network host, or a network guest —
-   * see the networking layer above: guest input is always read from
-   * getPlayerState(0), i.e. the WASD/E keys. So touch controls only ever
-   * need to drive ONE stick + ONE grab button, not a P1/P2 pair.
+   * Local co-op (no network room joined): TWO sticks, like two people
+   * sharing one screen — left = P1 (WASD/E), right = P2 (IJKL//).
+   * Online (host or guest via SlopShiftNetworking): this device only
+   * ever drives ONE local player — the networking layer always reads
+   * getPlayerState(0), i.e. WASD/E — so we collapse to a single stick
+   * on the right with the grab button on the left.
    */
   if (isTouch) {
     document.body.classList.add("is-touch-device");
@@ -4498,9 +4500,9 @@ void main() {
     touchRoot.id = "slop-touch-controls";
     shell.appendChild(touchRoot);
 
-    function makeStick() {
+    function makeStick(keys, side) {
       const wrap = document.createElement("div");
-      wrap.className = "slop-touch-stick slop-touch-stick-right";
+      wrap.className = "slop-touch-stick slop-touch-stick-" + side;
       const base = document.createElement("div");
       base.className = "slop-touch-stick-base";
       const knob = document.createElement("div");
@@ -4509,7 +4511,6 @@ void main() {
       wrap.appendChild(base);
       touchRoot.appendChild(wrap);
 
-      const keys = KEY_P1;
       let activeId = null, cx = 0, cy = 0;
       const RADIUS = 46;
       let curUp=false, curDown=false, curLeft=false, curRight=false;
@@ -4569,18 +4570,18 @@ void main() {
       wrap.addEventListener("touchmove", move, {passive:false});
       wrap.addEventListener("touchend", end);
       wrap.addEventListener("touchcancel", end);
-      return wrap;
+      return {wrap, reset: resetDir};
     }
-    makeStick();
 
-    function makeGrabButton() {
+    function makeGrabButton(cls, keyCode, side) {
       const btn = document.createElement("button");
       btn.type = "button";
-      btn.className = "slop-touch-action slop-touch-interact-left";
-      btn.textContent = "E";
+      btn.className = "slop-touch-action " + cls;
+      btn.textContent = keyCode === KEY_P1.interact ? "E" : "/";
+      btn.style[side] = "0";
       touchRoot.appendChild(btn);
-      const onDown = (e) => { setKey(KEY_P1.interact, true); e.preventDefault(); };
-      const onUp = (e) => { setKey(KEY_P1.interact, false); e.preventDefault(); };
+      const onDown = (e) => { setKey(keyCode, true); e.preventDefault(); };
+      const onUp = (e) => { setKey(keyCode, false); e.preventDefault(); };
       btn.addEventListener("touchstart", onDown, {passive:false});
       btn.addEventListener("touchend", onUp);
       btn.addEventListener("touchcancel", onUp);
@@ -4588,17 +4589,38 @@ void main() {
       btn.addEventListener("mouseup", onUp);
       return btn;
     }
-    makeGrabButton();
+
+    // Build both layouts up front; toggle visibility based on network mode.
+    const stickP1Left = makeStick(KEY_P1, "left");     // local co-op P1 (left)
+    const stickP1Right = makeStick(KEY_P1, "right");   // online solo (right)
+    const stickP2Right = makeStick(KEY_P2, "right");   // local co-op P2 (right)
+    stickP1Left.wrap.classList.add("slop-mode-local");
+    stickP2Right.wrap.classList.add("slop-mode-local");
+    stickP1Right.wrap.classList.add("slop-mode-online");
+
+    const grabLeftLocal = makeGrabButton("slop-touch-interact-p1 slop-mode-local", KEY_P1.interact, "left");
+    const grabRightLocal = makeGrabButton("slop-touch-interact-p2 slop-mode-local", KEY_P2.interact, "right");
+    const grabLeftOnline = makeGrabButton("slop-touch-interact-left slop-mode-online", KEY_P1.interact, "left");
+
+    function isOnline() {
+      const net = window.__SLOP_SHIFT_NET__;
+      return !!(net && net.slot !== null && net.slot !== undefined);
+    }
+    function syncLayoutMode() {
+      const online = isOnline();
+      touchRoot.classList.toggle("is-online-mode", online);
+      touchRoot.classList.toggle("is-local-mode", !online);
+      if (online) { stickP1Left.reset(); stickP2Right.reset(); }
+      else { stickP1Right.reset(); }
+    }
+    setInterval(syncLayoutMode, 200);
+    syncLayoutMode();
 
     const startBtn = document.querySelector('[data-screen="title"] [data-action="start"]');
     if (startBtn) startBtn.addEventListener("click", () => { if (!isFs()) toggleFs(); }, {once:true});
   }
 
-  /* ---------- Show gameplay controls only during actual play ----------
-   * Hide the touch stick/button and (optionally) gfx/fullscreen chrome
-   * while on the title, pause, or results screens; only show during
-   * "countdown" and "playing".
-   */
+  /* ---------- Show gameplay controls only during actual play ---------- */
   const playChrome = document.getElementById("slop-touch-controls");
   function syncChromeVisibility() {
     const playing = game.state === "playing" || game.state === "countdown";
@@ -4620,13 +4642,17 @@ void main() {
     "#slop-touch-controls{position:absolute;inset:0;z-index:6;pointer-events:none}" +
     "#slop-touch-controls.is-hidden{display:none}" +
     "#slop-touch-controls .slop-touch-stick,#slop-touch-controls .slop-touch-action{pointer-events:auto}" +
+    "#slop-touch-controls.is-local-mode .slop-mode-online{display:none}" +
+    "#slop-touch-controls.is-online-mode .slop-mode-local{display:none}" +
     ".slop-touch-stick{position:absolute;bottom:26px;z-index:6;width:120px;height:120px;touch-action:none}" +
-    ".slop-touch-stick-right{right:22px}" +
+    ".slop-touch-stick-left{left:22px}.slop-touch-stick-right{right:22px}" +
     ".slop-touch-stick-base{position:relative;width:100%;height:100%;border-radius:50%;background:rgba(255,255,255,.08);border:2px solid rgba(255,255,255,.25)}" +
     ".slop-touch-stick-knob{position:absolute;left:50%;top:50%;width:52px;height:52px;margin:-26px 0 0 -26px;border-radius:50%;background:rgba(255,255,255,.32);border:1px solid rgba(255,255,255,.5);transition:background .15s}" +
     ".slop-touch-stick.is-active .slop-touch-stick-knob{background:rgba(120,190,160,.65)}" +
     ".slop-touch-action{position:absolute;bottom:44px;z-index:6;width:64px;height:64px;border-radius:50%;background:rgba(255,255,255,.14);border:2px solid rgba(255,255,255,.3);color:#fff;font-size:20px;font-weight:700;touch-action:none}" +
-    ".slop-touch-interact-left{left:32px}" +
+    "#slop-touch-controls.is-local-mode .slop-touch-interact-p1{left:32px;bottom:170px}" +
+    "#slop-touch-controls.is-local-mode .slop-touch-interact-p2{right:32px;bottom:170px}" +
+    "#slop-touch-controls.is-online-mode .slop-touch-interact-left{left:32px;bottom:44px}" +
     "body.is-touch-device #game-shell{touch-action:none}" +
     "@media (min-width:900px){.slop-touch-stick,.slop-touch-action{transform:scale(1.1)}}";
   document.head.appendChild(style);
