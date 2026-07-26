@@ -4427,7 +4427,7 @@ void main() {
 (function () {
   "use strict";
 
-  const RELAY_URL = window.SLOP_SHIFT_RELAY_URL || "wss://slop-shift-relay.YOUR_SUBDOMAIN.workers.dev";
+  const RELAY_URL = window.SLOP_SHIFT_RELAY_URL || "wss://slopshift.secret5.workers.dev";
   const RELAY_HTTP = RELAY_URL.replace(/^wss:/, "https:").replace(/^ws:/, "http:");
   const STATE_HZ = 20;
   const STATE_INTERVAL = 1000 / STATE_HZ;
