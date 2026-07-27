@@ -4704,10 +4704,25 @@ void main() {
 <script>window.SLOP_SHIFT_RELAY_URL = "wss://slopshift.secret5.workers.dev";</script>
 <script type="module">
 /* SLOP SHIFT — remote co-op networking layer.
- * Host-authoritative: the host runs the real Game simulation and streams
- * state ~20x/sec; the guest only sends its own input and renders the
- * broadcast state. Works by monkey-patching the already-instantiated
- * `window.__SLOP_SHIFT__` game object, so the base game code is untouched.
+ * Peer-authoritative: BOTH clients run the real, unmodified Game simulation
+ * locally (same _simulatePlayersAndVat path as single-player), so movement,
+ * physics, and all animation (walk cycle, squash/stretch, wobble, etc.)
+ * always run correctly on both sides — there is no "dumb spectator" client
+ * that skips simulation and therefore looks frozen or stuck mid-pose.
+ *
+ * Each side is authoritative for its OWN player (slot 0 = host controls
+ * player[0] with WASD, slot 1 = guest controls player[1] with WASD/IJKL —
+ * the guest always reads its keys as "player 0" locally and we just target
+ * the right index when applying them). Each side simulates the REMOTE
+ * player too (so it's not frozen while waiting for network updates), but
+ * every time a peer update arrives we snap-correct that remote player's
+ * position/velocity toward what its owner reported, and blend the vat
+ * state between both sides' local physics and whichever side currently
+ * holds authority over the tug-of-war/vat contact response.
+ *
+ * The Durable Object relay is a dumb pass-through: it just forwards each
+ * player's own state + input to the other peer, nothing more. See
+ * src/room.js.
  */
 (function () {
   "use strict";
@@ -4716,6 +4731,7 @@ void main() {
   const RELAY_HTTP = RELAY_URL.replace(/^wss:/, "https:").replace(/^ws:/, "http:");
   const STATE_HZ = 20;
   const STATE_INTERVAL = 1000 / STATE_HZ;
+  const CORRECTION_RATE = 10; // how fast we blend toward the peer's reported transform each frame
 
   const game = window.__SLOP_SHIFT__;
   if (!game) {
@@ -4726,13 +4742,15 @@ void main() {
   const net = {
     ws: null,
     slot: null, // 0 = host, 1 = guest
+    myIndex: null, // which players[] entry this client owns (0 or 1)
+    peerIndex: null, // which players[] entry the peer owns
     roomCode: null,
     connected: false,
     peerConnected: false,
-    remoteInput: { moveX: 0, moveZ: 0, sprint: false, interact: false, interactPressed: false, interactReleased: false, moving: false },
     lastStateSendAt: 0,
     seq: 0,
     lastRecvSeq: -1,
+    remoteTarget: null, // last state packet received from the peer
     onStatus: null, // UI callback
   };
   window.__SLOP_SHIFT_NET__ = net;
@@ -4785,6 +4803,8 @@ void main() {
     switch (msg.t) {
       case "welcome":
         net.slot = msg.slot;
+        net.myIndex = msg.slot === 0 ? 0 : 1;
+        net.peerIndex = 1 - net.myIndex;
         clearTimeout(timeout);
         emitStatus(net.slot === 0 ? "hosting" : "joined");
         resolveConnect && resolveConnect(net.slot);
@@ -4795,17 +4815,14 @@ void main() {
         break;
       case "peer-left":
         net.peerConnected = false;
+        net.remoteTarget = null;
         emitStatus("peer-left");
         break;
-      case "input":
-        // host receives guest input
-        applyRemoteInput(msg.input);
-        break;
       case "state":
-        // guest receives host state
+        // peer's own authoritative transform for the player they own
         if (msg.seq === -1 || msg.seq > net.lastRecvSeq) {
           net.lastRecvSeq = msg.seq;
-          applyRemoteState(msg.state);
+          net.remoteTarget = msg.state;
         }
         break;
       case "event":
@@ -4826,70 +4843,44 @@ void main() {
     }
   }
 
-  // ---------- host side: broadcast authoritative state ----------
+  // ---------- state exchange ----------
+  // Each side reports ONLY its own player's transform (it owns that data),
+  // plus enough vat info for the receiving side to reconcile the vat.
 
-  function applyRemoteInput(input) {
-    // Guest always controls player index 1 (Blue / IJKL slot).
-    net.remoteInput = input;
-  }
-
-  function serializeState() {
-    const g = game;
-    const vatPos = g.vat.position || g.vat.group.position;
-    const vatVel = g.vat.velocity;
+  function serializeOwnState() {
+    const p = game.players[net.myIndex];
+    const vatPos = game.vat.position || game.vat.group.position;
+    const vatVel = game.vat.velocity;
     return {
-      time: g.timeRemaining,
-      elapsed: g.elapsed,
-      score: g.score,
-      slop: g.slopRemaining,
-      accidents: g.accidents,
-      samples: g.samplesCollected,
-      checkpointIndex: g.checkpointIndex,
-      gameState: g.state,
-      countdown: g.countdown,
-      players: g.players.map((p) => ({
+      time: game.timeRemaining,
+      elapsed: game.elapsed,
+      score: game.score,
+      slop: game.slopRemaining,
+      accidents: game.accidents,
+      samples: game.samplesCollected,
+      checkpointIndex: game.checkpointIndex,
+      gameState: game.state,
+      countdown: game.countdown,
+      player: {
         pos: [p.position.x, p.position.y, p.position.z],
+        vel: [p.velocity.x, p.velocity.y, p.velocity.z],
         rotY: p.visual ? p.visual.rotation.y : 0,
         grabbing: p.isGrabbing,
         stumbling: p.isStumbling,
-      })),
+      },
       vat: {
         pos: [vatPos.x, vatPos.y, vatPos.z],
         vel: vatVel ? [vatVel.x, vatVel.y, vatVel.z] : [0, 0, 0],
-        fill: g.vat.fillLevel,
-        holders: g.vat.holders ? g.vat.holders.map((h) => !!h) : [false, false],
+        fill: game.vat.fillLevel,
+        holders: game.vat.holders ? game.vat.holders.map((h) => !!h) : [false, false],
       },
     };
-  }
-
-  function applyRemoteState(state) {
-    // Guest: snap authoritative fields; player/vat transforms are interpolated
-    // each frame in the render hook below via net.targetState.
-    net.targetState = state;
-    game.timeRemaining = state.time;
-    game.score = state.score;
-    game.slopRemaining = state.slop;
-    game.accidents = state.accidents;
-    game.samplesCollected = state.samples;
-    game.checkpointIndex = state.checkpointIndex;
-    game.countdown = state.countdown;
-    if (state.gameState && game.state !== state.gameState) {
-      // Mirror host's high-level state (countdown/playing/finishing/results)
-      // without re-running the host's transition logic.
-      game.state = state.gameState;
-      // NOTE: input must stay enabled on the guest — it's still needed to
-      // read local WASD and send it to the host as this player's input.
-      // The guest never runs real physics (see _simulatePlayersAndVat
-      // override below), so leaving input enabled here is safe.
-    }
   }
 
   function applyRemoteEvents(events) {
     if (!Array.isArray(events)) return;
     for (const e of events) {
       if (e.type === "delivery-complete" || e.type === "checkpoint") {
-        // Let existing UI/audio hooks react the same way the host does,
-        // by re-using the game's own event processor on the guest.
         try {
           game._processLevelEvents([e], {});
         } catch {}
@@ -4898,79 +4889,107 @@ void main() {
   }
 
   // ---------- per-frame hooks ----------
+  // Both sides always run the REAL simulation for every player/vat, so
+  // walk cycles, squash/stretch, stumble reactions etc. always play. We
+  // just correct the remote player's transform toward the peer's report
+  // afterward, instead of skipping simulation for it.
 
   const originalSimulate = game._simulatePlayersAndVat.bind(game);
   game._simulatePlayersAndVat = function (dt) {
-    if (net.slot === 0) {
-      // HOST: run the real simulation, then broadcast state at STATE_HZ.
-      originalSimulate(dt);
-      const now = performance.now();
-      if (now - net.lastStateSendAt >= STATE_INTERVAL) {
-        net.lastStateSendAt = now;
-        net.seq += 1;
-        send({ t: "state", state: serializeState(), seq: net.seq });
-      }
-    } else if (net.slot === 1) {
-      // GUEST: don't simulate physics locally at all — just send input.
-      const localInput = this.input.getPlayerState(0);
-      send({ t: "input", input: localInput });
-      // Smoothly interpolate toward the last received host state.
-      interpolateFromHost(dt);
-    } else {
+    if (net.slot === null) {
       // Not networked: untouched local co-op behavior.
       originalSimulate(dt);
+      return;
+    }
+
+    // Run the full local simulation for BOTH players and the vat, exactly
+    // like single-player/local co-op. This guarantees animation always
+    // runs on both clients — nothing is ever "just interpolated".
+    originalSimulate(dt);
+
+    // Correct the remote player toward what its owner last reported, and
+    // gently reconcile the vat so both sides converge instead of diverging
+    // from running two independent physics sims.
+    reconcileWithPeer(dt);
+
+    const now = performance.now();
+    if (now - net.lastStateSendAt >= STATE_INTERVAL) {
+      net.lastStateSendAt = now;
+      net.seq += 1;
+      send({ t: "state", state: serializeOwnState(), seq: net.seq });
     }
   };
 
-  function interpolateFromHost(dt) {
-    const t = net.targetState;
-    if (!t || !t.players) return;
-    const lerp = 1 - Math.exp(-dt * 14);
-    game.players.forEach((p, i) => {
-      const tp = t.players[i];
-      if (!tp) return;
-      p.position.x += (tp.pos[0] - p.position.x) * lerp;
-      p.position.y += (tp.pos[1] - p.position.y) * lerp;
-      p.position.z += (tp.pos[2] - p.position.z) * lerp;
-      // Drive the player's own facing/speed from the position delta so
-      // its local _animate() (walk cycle, squash recovery, etc.) has
-      // real motion to react to, then run the per-frame animation pass
-      // that the host's simulation normally runs for us.
-      p.stumbleTimer = tp.stumbling ? Math.max(p.stumbleTimer, 0.1) : 0;
-      p.grabbedVat = tp.grabbing ? game.vat : null;
-      if (typeof p._animate === "function") {
-        const moved = Math.hypot(tp.pos[0] - p.position.x, tp.pos[2] - p.position.z) > 0.001;
-        p.animationTime += dt * (1 + p.speed * 0.85);
-        p._animate(dt, moved);
+  function reconcileWithPeer(dt) {
+    const t = net.remoteTarget;
+    if (!t) return;
+
+    // Mirror low-frequency scalar game state from whichever side is host
+    // (host stays the tie-breaker for round timer/score/etc. to avoid the
+    // two sims slowly drifting apart on things like timeRemaining).
+    if (net.slot === 1) {
+      game.timeRemaining = t.time;
+      game.score = t.score;
+      game.slopRemaining = t.slop;
+      game.accidents = t.accidents;
+      game.samplesCollected = t.samples;
+      game.checkpointIndex = t.checkpointIndex;
+      game.countdown = t.countdown;
+      if (t.gameState && game.state !== t.gameState) {
+        game.state = t.gameState;
       }
-      if (p.visual) p.visual.rotation.y = tp.rotY;
-    });
+    }
+
+    // Correct the peer's own player toward their authoritative transform.
+    const remotePlayer = game.players[net.peerIndex];
+    if (remotePlayer && t.player) {
+      const lerp = 1 - Math.exp(-dt * CORRECTION_RATE);
+      remotePlayer.position.x += (t.player.pos[0] - remotePlayer.position.x) * lerp;
+      remotePlayer.position.y += (t.player.pos[1] - remotePlayer.position.y) * lerp;
+      remotePlayer.position.z += (t.player.pos[2] - remotePlayer.position.z) * lerp;
+      if (t.player.vel) {
+        remotePlayer.velocity.x = t.player.vel[0];
+        remotePlayer.velocity.y = t.player.vel[1];
+        remotePlayer.velocity.z = t.player.vel[2];
+      }
+      // Don't fight the peer's own facing/animation state — their local
+      // sim already ran _animate() for their player this frame with
+      // correct input, so only nudge position/velocity, not visuals.
+    }
+
+    // Vat: blend positions from both sides' independent physics so a vat
+    // held by both players doesn't diverge. Host wins ties on fill level
+    // since spill/delivery logic is easiest to keep single-sourced there.
     const vatPos = game.vat.position || game.vat.group.position;
-    vatPos.x += (t.vat.pos[0] - vatPos.x) * lerp;
-    vatPos.y += (t.vat.pos[1] - vatPos.y) * lerp;
-    vatPos.z += (t.vat.pos[2] - vatPos.z) * lerp;
-    if (typeof game.vat.setFill === "function") game.vat.setFill(t.vat.fill);
-    // Vat also has its own idle/wobble animation (bubbles, tilt, slop
-    // surface) driven from update(); run a cheap animation-only pass so
-    // it doesn't look static on the guest either.
-    if (typeof game.vat._updateAnimation === "function") game.vat._updateAnimation(dt);
+    if (t.vat) {
+      const vatLerp = 1 - Math.exp(-dt * (CORRECTION_RATE * 0.5));
+      vatPos.x += (t.vat.pos[0] - vatPos.x) * vatLerp;
+      vatPos.y += (t.vat.pos[1] - vatPos.y) * vatLerp;
+      vatPos.z += (t.vat.pos[2] - vatPos.z) * vatLerp;
+      if (net.slot === 1 && typeof game.vat.setFill === "function") {
+        game.vat.setFill(t.vat.fill);
+      }
+    }
   }
 
-  // Host: fold in the guest's input as "player 2" (IJKL slot) each frame.
+  // Route input: each client only ever reads its OWN keyboard (always as
+  // logical slot 0, i.e. WASD) and applies it to the players[] index it
+  // owns. The remote player's input this frame doesn't matter for local
+  // simulation since we correct its transform in reconcileWithPeer(), so
+  // we just feed it a neutral/no-op input to keep its own local physics
+  // stable between corrections.
   const originalGetPlayerState = game.input.getPlayerState.bind(game.input);
+  const neutralInput = { moveX: 0, moveZ: 0, rawX: 0, rawZ: 0, moving: false, sprint: false, sprintPressed: false, interact: false, interactPressed: false, interactReleased: false };
   game.input.getPlayerState = function (index) {
-    if (net.slot === 0 && index === 1) {
-      return net.remoteInput;
-    }
-    if (net.slot === 1) {
-      // Guest keyboard always maps to their own on-screen character,
-      // which is always rendered as slot 0 locally... but physically the
-      // guest IS player 1 in the host sim. We keep local prediction simple:
-      // guest's own inputs go out over the wire (see send() above) using
-      // slot 0 semantics from their perspective; only P1 keys (WASD) are read.
+    if (net.slot === null) return originalGetPlayerState(index);
+    if (index === net.myIndex) {
+      // Always read the local player's own keys as WASD (logical slot 0),
+      // regardless of whether this client is host or guest.
       return originalGetPlayerState(0);
     }
-    return originalGetPlayerState(index);
+    // Remote player: don't drive it from local keys; its position is
+    // corrected from the network in reconcileWithPeer() every frame.
+    return neutralInput;
   };
 
   // ---------- public API for menu/UI ----------
@@ -4987,6 +5006,8 @@ void main() {
     leave() {
       if (net.ws) net.ws.close();
       net.slot = null;
+      net.myIndex = null;
+      net.peerIndex = null;
       net.roomCode = null;
     },
     setStatusHandler(fn) {
