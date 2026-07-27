@@ -4877,7 +4877,10 @@ void main() {
       // Mirror host's high-level state (countdown/playing/finishing/results)
       // without re-running the host's transition logic.
       game.state = state.gameState;
-      if (state.gameState === "playing") game.input.setEnabled(false); // guest never drives sim directly
+      // NOTE: input must stay enabled on the guest — it's still needed to
+      // read local WASD and send it to the host as this player's input.
+      // The guest never runs real physics (see _simulatePlayersAndVat
+      // override below), so leaving input enabled here is safe.
     }
   }
 
@@ -4929,6 +4932,17 @@ void main() {
       p.position.x += (tp.pos[0] - p.position.x) * lerp;
       p.position.y += (tp.pos[1] - p.position.y) * lerp;
       p.position.z += (tp.pos[2] - p.position.z) * lerp;
+      // Drive the player's own facing/speed from the position delta so
+      // its local _animate() (walk cycle, squash recovery, etc.) has
+      // real motion to react to, then run the per-frame animation pass
+      // that the host's simulation normally runs for us.
+      p.stumbleTimer = tp.stumbling ? Math.max(p.stumbleTimer, 0.1) : 0;
+      p.grabbedVat = tp.grabbing ? game.vat : null;
+      if (typeof p._animate === "function") {
+        const moved = Math.hypot(tp.pos[0] - p.position.x, tp.pos[2] - p.position.z) > 0.001;
+        p.animationTime += dt * (1 + p.speed * 0.85);
+        p._animate(dt, moved);
+      }
       if (p.visual) p.visual.rotation.y = tp.rotY;
     });
     const vatPos = game.vat.position || game.vat.group.position;
@@ -4936,6 +4950,10 @@ void main() {
     vatPos.y += (t.vat.pos[1] - vatPos.y) * lerp;
     vatPos.z += (t.vat.pos[2] - vatPos.z) * lerp;
     if (typeof game.vat.setFill === "function") game.vat.setFill(t.vat.fill);
+    // Vat also has its own idle/wobble animation (bubbles, tilt, slop
+    // surface) driven from update(); run a cheap animation-only pass so
+    // it doesn't look static on the guest either.
+    if (typeof game.vat._updateAnimation === "function") game.vat._updateAnimation(dt);
   }
 
   // Host: fold in the guest's input as "player 2" (IJKL slot) each frame.
