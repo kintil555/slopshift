@@ -4752,6 +4752,11 @@ void main() {
     lastRecvSeq: -1,
     remoteTarget: null, // last state packet received from the peer
     onStatus: null, // UI callback
+    onLobby: null, // UI callback: (players, hostSlot) => void
+    onKicked: null, // UI callback: fired on the guest when the host kicks them
+    onGameStart: null, // UI callback: fired on both clients when host starts the round
+    lobbyPlayers: [], // last known [{slot,name,connected}]
+    localName: "",
   };
   window.__SLOP_SHIFT_NET__ = net;
 
@@ -4763,12 +4768,14 @@ void main() {
     return data.room;
   }
 
-  function connect(roomCode, { asHost }) {
+  function connect(roomCode, { asHost, name } = {}) {
     return new Promise((resolve, reject) => {
-      const url = `${RELAY_URL}/ws/${roomCode}`;
+      const qs = name ? `?name=${encodeURIComponent(name)}` : "";
+      const url = `${RELAY_URL}/ws/${roomCode}${qs}`;
       const ws = new WebSocket(url);
       net.ws = ws;
       net.roomCode = roomCode;
+      net.localName = name || "";
 
       const timeout = setTimeout(() => reject(new Error("Connection timed out")), 8000);
 
@@ -4817,6 +4824,16 @@ void main() {
         net.peerConnected = false;
         net.remoteTarget = null;
         emitStatus("peer-left");
+        break;
+      case "lobby":
+        net.lobbyPlayers = msg.players || [];
+        net.onLobby && net.onLobby(net.lobbyPlayers, msg.hostSlot ?? 0);
+        break;
+      case "kicked":
+        net.onKicked && net.onKicked();
+        break;
+      case "start-game":
+        net.onGameStart && net.onGameStart();
         break;
       case "state":
         // peer's own authoritative transform for the player they own
@@ -4995,13 +5012,25 @@ void main() {
   // ---------- public API for menu/UI ----------
 
   window.SlopShiftNetworking = {
-    async hostGame() {
+    async hostGame(name) {
       const code = await createRoom();
-      await connect(code, { asHost: true });
+      await connect(code, { asHost: true, name });
       return code;
     },
-    async joinGame(code) {
-      await connect(code.toUpperCase(), { asHost: false });
+    async joinGame(code, name) {
+      await connect(code.toUpperCase(), { asHost: false, name });
+    },
+    setName(name) {
+      net.localName = name || "";
+      send({ t: "set-name", name: net.localName });
+    },
+    kickPeer() {
+      // Only meaningful for the host; server also enforces this.
+      if (net.slot === 0) send({ t: "kick" });
+    },
+    startGame() {
+      // Only meaningful for the host; server also enforces this.
+      if (net.slot === 0) send({ t: "start-game" });
     },
     leave() {
       if (net.ws) net.ws.close();
@@ -5009,9 +5038,19 @@ void main() {
       net.myIndex = null;
       net.peerIndex = null;
       net.roomCode = null;
+      net.lobbyPlayers = [];
     },
     setStatusHandler(fn) {
       net.onStatus = fn;
+    },
+    setLobbyHandler(fn) {
+      net.onLobby = fn;
+    },
+    setKickedHandler(fn) {
+      net.onKicked = fn;
+    },
+    setGameStartHandler(fn) {
+      net.onGameStart = fn;
     },
     getState: () => net,
   };
@@ -5032,37 +5071,169 @@ void main() {
     return e;
   }
 
-  const boxStyle =
+  const NAME_KEY = "slopshift-player-name";
+
+  const barStyle =
     "position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:9999;" +
     "background:rgba(8,11,13,.92);border:1px solid #2a3a2f;border-radius:10px;" +
     "padding:12px 16px;font:14px system-ui,sans-serif;color:#d8ffd0;display:flex;gap:8px;align-items:center;";
+  const panelStyle =
+    "position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:9999;" +
+    "background:rgba(8,11,13,.95);border:1px solid #2a3a2f;border-radius:12px;" +
+    "padding:16px 20px;font:14px system-ui,sans-serif;color:#d8ffd0;min-width:280px;" +
+    "box-shadow:0 8px 28px rgba(0,0,0,.45);";
   const inputStyle =
     "width:90px;text-transform:uppercase;letter-spacing:2px;text-align:center;" +
     "background:#0e1512;border:1px solid #3a5a44;border-radius:6px;color:#eaffea;padding:6px;font:14px monospace;";
+  const nameInputStyle =
+    "width:120px;background:#0e1512;border:1px solid #3a5a44;border-radius:6px;" +
+    "color:#eaffea;padding:6px;font:14px system-ui,sans-serif;";
   const btnStyle =
     "background:#3ea24a;border:none;border-radius:6px;color:#04140a;font-weight:600;" +
     "padding:6px 12px;cursor:pointer;";
+  const btnStyleWide =
+    "background:#3ea24a;border:none;border-radius:6px;color:#04140a;font-weight:700;" +
+    "padding:9px 16px;cursor:pointer;width:100%;font-size:15px;";
+  const btnStyleDanger =
+    "background:#7a2626;border:none;border-radius:6px;color:#ffe4e4;font-weight:600;" +
+    "padding:4px 10px;cursor:pointer;font-size:12px;";
+  const btnStyleGhost =
+    "background:transparent;border:1px solid #3a5a44;border-radius:6px;color:#b7d8bb;" +
+    "font-weight:600;padding:9px 14px;cursor:pointer;";
 
+  // ---------- state ----------
+  let mode = "menu"; // "menu" | "room"
+  let savedName = "";
+  try {
+    savedName = localStorage.getItem(NAME_KEY) || "";
+  } catch {}
+
+  // ---------- menu bar (before joining/hosting) ----------
   const status = el("span", { style: "opacity:.75" }, "Local co-op");
+  const nameInput = el("input", {
+    style: nameInputStyle,
+    placeholder: "Your name",
+    maxlength: "16",
+    value: savedName,
+  });
   const codeInput = el("input", { style: inputStyle, placeholder: "CODE", maxlength: "5" });
   const hostBtn = el("button", { style: btnStyle }, "Host");
   const joinBtn = el("button", { style: btnStyle }, "Join");
-  const roomLabel = el("span", { style: "font:14px monospace;color:#8be08b;display:none" });
 
-  const bar = el("div", { style: boxStyle }, status, codeInput, joinBtn, hostBtn, roomLabel);
-  document.body.appendChild(bar);
+  const menuBar = el("div", { style: barStyle }, status, nameInput, codeInput, joinBtn, hostBtn);
+  document.body.appendChild(menuBar);
+
+  // ---------- room panel (after connecting) ----------
+  const roomTitle = el("div", { style: "font-weight:700;font-size:15px;margin-bottom:2px;" }, "Room");
+  const roomCodeLabel = el("div", {
+    style: "font:15px monospace;letter-spacing:3px;color:#8be08b;margin-bottom:12px;",
+  });
+  const playerList = el("div", { style: "display:flex;flex-direction:column;gap:6px;margin-bottom:12px;" });
+  const roomStatusLine = el("div", { style: "opacity:.7;font-size:12px;margin-bottom:12px;min-height:16px;" });
+  const startBtn = el("button", { style: btnStyleWide }, "Start Game");
+  const leaveBtn = el("button", { style: btnStyleGhost + "margin-top:8px;width:100%;" }, "Leave Room");
+  const buttonRow = el("div", { style: "display:flex;flex-direction:column;" }, startBtn, leaveBtn);
+
+  const roomPanel = el(
+    "div",
+    { style: panelStyle + "display:none;" },
+    roomTitle,
+    roomCodeLabel,
+    playerList,
+    roomStatusLine,
+    buttonRow
+  );
+  document.body.appendChild(roomPanel);
 
   function setStatus(text) {
     status.textContent = text;
   }
 
+  function persistName() {
+    const n = nameInput.value.trim();
+    try {
+      if (n) localStorage.setItem(NAME_KEY, n);
+    } catch {}
+    return n;
+  }
+
+  function showMenu() {
+    mode = "menu";
+    menuBar.style.display = "flex";
+    roomPanel.style.display = "none";
+  }
+
+  function showRoom() {
+    mode = "room";
+    menuBar.style.display = "none";
+    roomPanel.style.display = "block";
+  }
+
+  function playerRow({ slot, name, connected }, hostSlot, mySlot) {
+    const isHost = slot === hostSlot;
+    const isMe = slot === mySlot;
+    const label = connected
+      ? (name || (slot === 0 ? "Player 1" : "Player 2")) + (isMe ? " (You)" : "")
+      : "Waiting for player…";
+
+    const rowStyle =
+      "display:flex;align-items:center;justify-content:space-between;gap:8px;" +
+      "background:#0e1512;border:1px solid #24352b;border-radius:8px;padding:7px 10px;" +
+      (connected ? "" : "opacity:.55;");
+
+    const nameEl = el(
+      "span",
+      { style: "display:flex;align-items:center;gap:6px;" },
+      el("span", { style: `font-weight:${isMe ? "700" : "500"};` }, label),
+      isHost && connected ? el("span", { style: "font-size:11px;color:#f0c766;" }, "HOST") : ""
+    );
+
+    const kids = [nameEl];
+
+    // Host sees a Kick button on the guest's row (slot 1), when connected.
+    if (mySlot === hostSlot && slot !== hostSlot && connected) {
+      const kickBtn = el("button", { style: btnStyleDanger }, "Kick");
+      kickBtn.addEventListener("click", () => {
+        window.SlopShiftNetworking.kickPeer();
+      });
+      kids.push(kickBtn);
+    }
+
+    return el("div", { style: rowStyle }, ...kids);
+  }
+
+  function renderLobby(players, hostSlot) {
+    const net = window.SlopShiftNetworking.getState();
+    const mySlot = net.slot;
+    playerList.innerHTML = "";
+    (players.length ? players : [{ slot: 0, connected: false }, { slot: 1, connected: false }]).forEach((p) => {
+      playerList.appendChild(playerRow(p, hostSlot, mySlot));
+    });
+
+    const guest = players.find((p) => p.slot === 1);
+    const iAmHost = mySlot === hostSlot;
+
+    if (iAmHost) {
+      startBtn.style.display = "block";
+      startBtn.disabled = !guest || !guest.connected;
+      startBtn.textContent = guest && guest.connected ? "Start Game" : "Waiting for a player…";
+      roomStatusLine.textContent = guest && guest.connected
+        ? "Everyone's here. Start whenever you're ready."
+        : "Share the room code with your co-worker.";
+    } else {
+      startBtn.style.display = "none";
+      roomStatusLine.textContent = "Waiting for the host to start the game…";
+    }
+  }
+
   hostBtn.addEventListener("click", async () => {
+    const name = persistName();
     hostBtn.disabled = true;
     setStatus("Creating room…");
     try {
-      const code = await window.SlopShiftNetworking.hostGame();
-      roomLabel.textContent = `Room: ${code}`;
-      roomLabel.style.display = "inline";
+      const code = await window.SlopShiftNetworking.hostGame(name);
+      roomCodeLabel.textContent = `Room: ${code}`;
+      showRoom();
       setStatus("Hosting — waiting for a player…");
     } catch (err) {
       setStatus("Failed to host: " + err.message);
@@ -5074,10 +5245,13 @@ void main() {
   joinBtn.addEventListener("click", async () => {
     const code = codeInput.value.trim();
     if (!code) return;
+    const name = persistName();
     joinBtn.disabled = true;
     setStatus("Joining…");
     try {
-      await window.SlopShiftNetworking.joinGame(code);
+      await window.SlopShiftNetworking.joinGame(code, name);
+      roomCodeLabel.textContent = `Room: ${code.toUpperCase()}`;
+      showRoom();
       setStatus("Connected");
     } catch (err) {
       setStatus("Failed to join: " + err.message);
@@ -5086,16 +5260,73 @@ void main() {
     }
   });
 
+  startBtn.addEventListener("click", () => {
+    window.SlopShiftNetworking.startGame();
+  });
+
+  leaveBtn.addEventListener("click", () => {
+    window.SlopShiftNetworking.leave();
+    showMenu();
+    setStatus("Local co-op");
+    roomCodeLabel.textContent = "";
+    playerList.innerHTML = "";
+  });
+
   window.SlopShiftNetworking.setStatusHandler((s) => {
     const map = {
       hosting: "Hosting — waiting for a player…",
       joined: "Joined — syncing…",
-      "peer-joined": "Player connected! Starting…",
+      "peer-joined": "Player connected!",
       "peer-left": "Other player disconnected",
       disconnected: "Disconnected",
     };
     setStatus(map[s] || s);
+    if (s === "disconnected" && mode === "room") {
+      showMenu();
+      roomCodeLabel.textContent = "";
+      playerList.innerHTML = "";
+    }
   });
+
+  window.SlopShiftNetworking.setLobbyHandler((players, hostSlot) => {
+    if (mode !== "room") showRoom();
+    renderLobby(players, hostSlot);
+  });
+
+  window.SlopShiftNetworking.setKickedHandler(() => {
+    window.SlopShiftNetworking.leave();
+    showMenu();
+    setStatus("You were kicked by the host");
+    roomCodeLabel.textContent = "";
+    playerList.innerHTML = "";
+  });
+
+  window.SlopShiftNetworking.setGameStartHandler(() => {
+    // Fires on BOTH clients (host included, relayed back by the server)
+    // so the round begins at the same moment for everyone. Hide the room
+    // panel so it doesn't sit on top of the HUD during play.
+    roomPanel.style.display = "none";
+    const game = window.__SLOP_SHIFT__;
+    if (game) {
+      game.beginRound();
+      game.start();
+    }
+  });
+
+  // Re-show the room panel automatically if the round ends and we're
+  // still connected to a room, so host/guest land back in the lobby
+  // instead of the single-player title screen.
+  const originalReturnToTitle = window.__SLOP_SHIFT__?.returnToTitle?.bind(window.__SLOP_SHIFT__);
+  if (originalReturnToTitle) {
+    window.__SLOP_SHIFT__.returnToTitle = function (...args) {
+      originalReturnToTitle(...args);
+      const net = window.SlopShiftNetworking.getState();
+      if (net.slot !== null) {
+        roomPanel.style.display = "block";
+        renderLobby(net.lobbyPlayers, 0);
+      }
+    };
+  }
 })();
 
 </script>
