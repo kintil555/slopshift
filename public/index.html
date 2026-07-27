@@ -4338,9 +4338,20 @@ void main() {
 @keyframes slopGrip { to { box-shadow: 0 0 18px color-mix(in srgb, var(--worker-color), transparent 35%); } }
 @keyframes slopAnnouncement { from { opacity: 0; transform: translate(-50%, -35%) scale(.92); } }
 @media (max-width: 650px) {
-  .slop-screen { padding: 24px 12px; }
-  .slop-panel { padding: 22px 15px; }
-  .slop-tutorial { grid-template-columns: 1fr; }
+  .slop-screen { padding: 16px 10px; align-items: flex-start; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  .slop-panel { padding: 16px 12px; max-width: 100%; width: 100%; max-height: none; }
+  .slop-logo { font-size: clamp(28px, 9vw, 40px); }
+  .slop-tagline, .slop-mission { font-size: 13px; line-height: 1.4; }
+  .slop-tutorial { grid-template-columns: 1fr; gap: 8px; }
+  .slop-worker-card { padding: 10px 12px; }
+  .slop-tabs { display: flex; }
+  .slop-tab { flex: 1; padding: 10px 6px; font-size: 13px; }
+  .slop-actions { flex-direction: column; }
+  .slop-button { width: 100%; min-height: 44px; font-size: 15px; }
+  .slop-mp-row { flex-direction: column; }
+  .slop-mp-input { width: 100%; min-height: 44px; font-size: 16px; }
+  .slop-icon-button { min-width: 44px; min-height: 44px; }
+  .slop-volume { width: 90px; }
   .slop-hud { padding: 8px; }
   .slop-hud-top { grid-template-columns: 1fr auto 1fr; gap: 5px; }
   .slop-readout { min-height: 40px; padding: 6px 8px; }
@@ -4349,6 +4360,10 @@ void main() {
   .slop-hud-mid { margin-top: 6px; gap: 6px; }
   .slop-grip { min-width: 128px; padding: 7px; }
   .slop-results-stats { grid-template-columns: 1fr; }
+}
+@media (max-width: 400px) {
+  .slop-logo { font-size: 26px; }
+  .slop-panel { padding: 12px 10px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .slop-ui *, .slop-ui *::before, .slop-ui *::after {
