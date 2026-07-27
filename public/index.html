@@ -5116,10 +5116,12 @@ void main() {
 
   // Route input: each client only ever reads its OWN keyboard (always as
   // logical slot 0, i.e. WASD) and applies it to the players[] index it
-  // owns. The remote player's input this frame doesn't matter for local
-  // simulation since we correct its transform in reconcileWithPeer(), so
-  // we just feed it a neutral/no-op input to keep its own local physics
-  // stable between corrections.
+  // owns. The remote player's position/velocity is corrected from the
+  // network in reconcileWithPeer() every frame, but _animate() (walk
+  // cycle, carrying pose, facing) is driven by the INPUT passed into
+  // update(), not by position deltas. So we synthesize a "moving" input
+  // for the remote player from the peer's last-reported velocity/grab
+  // state, instead of feeding it a permanently-neutral (idle) input.
   const originalGetPlayerState = game.input.getPlayerState.bind(game.input);
   const neutralInput = { moveX: 0, moveZ: 0, rawX: 0, rawZ: 0, moving: false, sprint: false, sprintPressed: false, interact: false, interactPressed: false, interactReleased: false };
   game.input.getPlayerState = function (index) {
@@ -5129,8 +5131,29 @@ void main() {
       // regardless of whether this client is host or guest.
       return originalGetPlayerState(0);
     }
-    // Remote player: don't drive it from local keys; its position is
-    // corrected from the network in reconcileWithPeer() every frame.
+    // Remote player: synthesize movement input from the peer's reported
+    // velocity so the walk-cycle/carry animation actually plays, matching
+    // what's happening on the peer's own screen.
+    const t = net.remoteTarget;
+    if (t && t.player && t.player.vel) {
+      const vx = t.player.vel[0];
+      const vz = t.player.vel[2];
+      const speed = Math.hypot(vx, vz);
+      if (speed > 0.05) {
+        return {
+          moveX: vx / speed,
+          moveZ: vz / speed,
+          rawX: vx / speed,
+          rawZ: vz / speed,
+          moving: true,
+          sprint: speed > 5,
+          sprintPressed: false,
+          interact: !!t.player.grabbing,
+          interactPressed: false,
+          interactReleased: false,
+        };
+      }
+    }
     return neutralInput;
   };
 
