@@ -4934,12 +4934,15 @@ void main() {
         net.slot = msg.slot;
         net.myIndex = msg.slot === 0 ? 0 : 1;
         net.peerIndex = 1 - net.myIndex;
+        net.lastRecvSeq = -1;
+        net.remoteTarget = null;
         clearTimeout(timeout);
         emitStatus(net.slot === 0 ? "hosting" : "joined");
         resolveConnect && resolveConnect(net.slot);
         break;
       case "peer-joined":
         net.peerConnected = true;
+        net.lastRecvSeq = -1;
         emitStatus("peer-joined");
         break;
       case "peer-left":
