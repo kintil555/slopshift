@@ -5094,9 +5094,24 @@ void main() {
         remotePlayer.velocity.y = t.player.vel[1];
         remotePlayer.velocity.z = t.player.vel[2];
       }
-      // Don't fight the peer's own facing/animation state — their local
-      // sim already ran _animate() for their player this frame with
-      // correct input, so only nudge position/velocity, not visuals.
+      // Facing direction is NOT re-derivable from the reported velocity on
+      // this client: _getDesiredDirection() turns moveX/moveZ into a world
+      // direction by projecting through THIS client's own camera basis, but
+      // the synthetic input we feed it above is already a world-space
+      // vector (borrowed from the peer's velocity). Re-projecting a
+      // world-space vector through a second, locally-different camera
+      // basis rotates it again, which is why the remote player's facing
+      // came out wrong/mirrored relative to their own screen (moonwalking)
+      // even though position/velocity matched. The peer already computed
+      // their correct facing angle locally and sent it as rotY, so apply
+      // that directly instead of re-deriving it here.
+      if (typeof t.player.rotY === "number" && remotePlayer.visual) {
+        remotePlayer.visual.rotation.y = t.player.rotY;
+        // Keep the logical facing vector (used for grab reach, tethering,
+        // etc.) consistent with the visual so gameplay reads the same
+        // direction the peer is actually facing.
+        remotePlayer.facing.set(Math.sin(t.player.rotY), 0, Math.cos(t.player.rotY));
+      }
     }
 
     // Vat: blend positions from both sides' independent physics so a vat
