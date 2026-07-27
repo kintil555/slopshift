@@ -18,7 +18,25 @@ export class GameRoom {
     this.env = env;
     // sockets[0] = host, sockets[1] = guest
     this.sockets = [null, null];
+    this.names = [null, null];
     this.lastState = null; // cache last host state so a reconnecting guest gets something immediately
+  }
+
+  _lobbyPayload() {
+    return {
+      t: "lobby",
+      hostSlot: 0,
+      players: [0, 1].map((slot) => ({
+        slot,
+        name: this.names[slot] || (slot === 0 ? "Host" : "Guest"),
+        connected: !!this.sockets[slot],
+      })),
+    };
+  }
+
+  _broadcastLobby() {
+    const msg = JSON.stringify(this._lobbyPayload());
+    for (const sock of this.sockets) sock?.send(msg);
   }
 
   async fetch(request) {
@@ -38,6 +56,9 @@ export class GameRoom {
     server.accept();
     this.sockets[slot] = server;
 
+    const url = new URL(request.url);
+    this.names[slot] = url.searchParams.get("name") || null;
+
     server.send(JSON.stringify({ t: "welcome", slot, roomCode: this._roomCodeGuess(request) }));
 
     const other = this.sockets[1 - slot];
@@ -50,6 +71,7 @@ export class GameRoom {
         server.send(JSON.stringify({ t: "state", state: this.lastState, seq: -1 }));
       }
     }
+    this._broadcastLobby();
 
     server.addEventListener("message", (evt) => this._onMessage(slot, evt));
     server.addEventListener("close", () => this._onClose(slot));
@@ -96,6 +118,28 @@ export class GameRoom {
         if (slot === 0 && other) other.send(JSON.stringify({ t: "event", events: msg.events }));
         return;
       }
+      case "set-name": {
+        this.names[slot] = msg.name || null;
+        this._broadcastLobby();
+        return;
+      }
+      case "kick": {
+        // Only the host (slot 0) may kick the guest (slot 1).
+        if (slot === 0 && this.sockets[1]) {
+          this.sockets[1].send(JSON.stringify({ t: "kicked" }));
+          this.sockets[1].close();
+        }
+        return;
+      }
+      case "start-game": {
+        // Only the host (slot 0) may start the round; requires a connected guest.
+        if (slot === 0 && this.sockets[1]) {
+          const startMsg = JSON.stringify({ t: "start-game" });
+          this.sockets[0]?.send(startMsg);
+          this.sockets[1]?.send(startMsg);
+        }
+        return;
+      }
       default:
         return;
     }
@@ -103,9 +147,11 @@ export class GameRoom {
 
   _onClose(slot) {
     this.sockets[slot] = null;
+    this.names[slot] = null;
     const other = this.sockets[1 - slot];
     if (other) {
       other.send(JSON.stringify({ t: "peer-left" }));
+      this._broadcastLobby();
     } else {
       this.lastState = null; // room is empty, drop cached state
     }
