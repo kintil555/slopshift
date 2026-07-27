@@ -1,8 +1,9 @@
 // GameRoom: a Durable Object instance = one game room (max 2 players).
-// Slot 0 = host (runs the real simulation), Slot 1 = guest (sends input, renders host's state).
+// Peer-to-peer relay: each side simulates locally and reports its OWN
+// player's transform; the server just relays state between the two peers.
 // Message protocol (JSON over WebSocket):
 //   client -> server: {t:"input", input:{...}}                 (guest input each frame)
-//   client -> server: {t:"state", state:{...}, seq}             (host state broadcast)
+//   client -> server: {t:"state", state:{...}, seq}             (either side's own player state)
 //   client -> server: {t:"event", events:[...]}                 (host one-off events: spill, checkpoint, etc)
 //   client -> server: {t:"ping", time}
 //   client -> server: {t:"set-name", name}
@@ -11,7 +12,7 @@
 //   server -> client: {t:"welcome", slot:0|1, roomCode}
 //   server -> client: {t:"peer-joined"} / {t:"peer-left"}
 //   server -> client: {t:"input", input:{...}}       (relayed to host)
-//   server -> client: {t:"state", state:{...}, seq}  (relayed to guest)
+//   server -> client: {t:"state", state:{...}, seq}  (relayed to the other peer)
 //   server -> client: {t:"event", events:[...]}      (relayed to guest)
 //   server -> client: {t:"lobby", hostSlot, players:[{slot,name,connected}]}
 //   server -> client: {t:"kicked"}
@@ -113,11 +114,10 @@ export class GameRoom {
         return;
       }
       case "state": {
-        // host (slot 0) -> guest (slot 1)
-        if (slot === 0) {
-          this.lastState = msg.state;
-          if (other) other.send(JSON.stringify({ t: "state", state: msg.state, seq: msg.seq }));
-        }
+        // Peer-to-peer: EITHER side reports its own player's transform.
+        // Relay it straight to the other peer regardless of which slot sent it.
+        if (slot === 0) this.lastState = msg.state; // cache host state for late joiners
+        if (other) other.send(JSON.stringify({ t: "state", state: msg.state, seq: msg.seq }));
         return;
       }
       case "event": {
