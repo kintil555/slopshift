@@ -5,11 +5,17 @@
 //   client -> server: {t:"state", state:{...}, seq}             (host state broadcast)
 //   client -> server: {t:"event", events:[...]}                 (host one-off events: spill, checkpoint, etc)
 //   client -> server: {t:"ping", time}
+//   client -> server: {t:"set-name", name}
+//   client -> server: {t:"kick"}                                 (host only)
+//   client -> server: {t:"start-game"}                           (host only)
 //   server -> client: {t:"welcome", slot:0|1, roomCode}
 //   server -> client: {t:"peer-joined"} / {t:"peer-left"}
 //   server -> client: {t:"input", input:{...}}       (relayed to host)
 //   server -> client: {t:"state", state:{...}, seq}  (relayed to guest)
 //   server -> client: {t:"event", events:[...]}      (relayed to guest)
+//   server -> client: {t:"lobby", hostSlot, players:[{slot,name,connected}]}
+//   server -> client: {t:"kicked"}
+//   server -> client: {t:"start-game"}
 //   server -> client: {t:"pong", time}
 
 export class GameRoom {
